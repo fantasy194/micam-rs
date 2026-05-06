@@ -1,5 +1,7 @@
 FROM rust:1-bookworm AS builder
 
+LABEL org.opencontainers.image.source=https://github.com/fantasy194/micam-rs.git
+
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
