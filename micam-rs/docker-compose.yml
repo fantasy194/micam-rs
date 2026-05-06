@@ -1,0 +1,12 @@
+services:
+  micam-rs:
+    image: micam-rs:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    network_mode: host
+    gpus: all
+    restart: always
