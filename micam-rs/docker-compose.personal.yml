@@ -1,0 +1,100 @@
+services:
+
+  # https://github.com/XiaoMi/xiaomi-miloco
+  miloco:
+    container_name: miloco
+    # image: ghcr.nju.edu.cn/xiaomi/miloco-backend # Official image
+    image: ghcr.nju.edu.cn/miiot/miloco:main # Modified image to using HD stream
+    network_mode: host
+    environment:
+      BACKEND_PORT: ${MILOCO_PORT:-8000}
+      BACKEND_LOG_LEVEL: ${MILOCO_LOG_LEVEL:-warning}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./miloco:/app/miloco_server/.temp
+    # NOTICE: Mount configuration files, if you want to use your own configuration files, please mount them here.
+    #  - ./miloco/server_config.yaml:/app/config/server_config.yaml
+    #  - ./miloco/prompt_config.yaml:/app/config/prompt_config.yaml
+    restart: unless-stopped
+    profiles: ["remote"]
+
+  # https://github.com/AlexxIT/go2rtc
+  # go2rtc:
+  #   container_name: go2rtc
+  #   image: ghcr.nju.edu.cn/alexxit/go2rtc
+  #   network_mode: host       # important for WebRTC, HomeKit, UDP cameras
+  #   privileged: true         # only for FFmpeg hardware transcoding
+  #   restart: unless-stopped  # autorestart on fail or config change from WebUI
+  #   environment:
+  #     TZ: ${TZ:-Asia/Shanghai}
+  #   volumes:
+  #     - ./go2rtc:/config     # folder for go2rtc.yaml file (edit from WebUI)
+
+  micam1: &micam
+    container_name: micam1
+    image: ghcr.nju.edu.cn/fantasy194/micam-rs:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    network_mode: host
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./config:/config
+    environment: &micam_envs
+      MILOCO_MODE: ${MILOCO_MODE:-native}
+      MILOCO_BASE_URL: ${MILOCO_BASE_URL:-https://miloco:8000}
+      MILOCO_PASSWORD: ${MILOCO_PASSWORD:-f0c0d0a027419eba1a0e38625b38ee88}
+      CAMERA_ID: ${CAMERA_ID:-1190866232}
+      RTSP_URL: ${RTSP_URL:-rtsp://admin:946008@192.168.0.200:8554/nanwoshi_ws}
+      VIDEO_CODEC: ${VIDEO_CODEC:-h264}
+      STREAM_CHANNEL: ${STREAM_CHANNEL:-0}
+      FFMPEG_GPU_ENABLED: ${FFMPEG_GPU_ENABLED:-false}
+      FFMPEG_HWACCEL: ${FFMPEG_HWACCEL:-qsv}
+      FFMPEG_VIDEO_ENCODER: ${FFMPEG_VIDEO_ENCODER:-h264_qsv}
+      FFMPEG_VAAPI_DEVICE: ${FFMPEG_VAAPI_DEVICE:-/dev/dri/renderD128}
+      FFMPEG_EXTRA_ARGS: ${FFMPEG_EXTRA_ARGS:-}
+      FFMPEG_LOW_LATENCY: ${FFMPEG_LOW_LATENCY:-true}
+      MIOT_ACCESS_TOKEN: ${MIOT_ACCESS_TOKEN:-}
+      MIOT_REFRESH_TOKEN: ${MIOT_REFRESH_TOKEN:-}
+      MIOT_TOKEN_FILE: ${MIOT_TOKEN_FILE:-/config/miot_token.json}
+      MIOT_OAUTH_REDIRECT_URI: ${MIOT_OAUTH_REDIRECT_URI:-https://mico.api.mijia.tech/login_redirect}
+      MIOT_REFRESH_MARGIN_SECONDS: ${MIOT_REFRESH_MARGIN_SECONDS:-1800}
+      MIOT_OAUTH_UUID: ${MIOT_OAUTH_UUID:-micam-rs}
+      MIOT_CLOUD_SERVER: ${MIOT_CLOUD_SERVER:-cn}
+      MIOT_CAMERA_MODEL: ${MIOT_CAMERA_MODEL:-}
+      MIOT_CHANNEL_COUNT: ${MIOT_CHANNEL_COUNT:-1}
+      MIOT_VIDEO_QUALITY: ${MIOT_VIDEO_QUALITY:-2}
+      MIOT_ENABLE_AUDIO: ${MIOT_ENABLE_AUDIO:-false}
+      MIOT_PIN_CODE: ${MIOT_PIN_CODE:-}
+      MIOT_LIB_PATH: ${MIOT_LIB_PATH:-/usr/local/lib/libmiot_camera_lite.so}
+      MIOT_QUEUE_CAPACITY: ${MIOT_QUEUE_CAPACITY:-8}
+      TZ: ${TZ:-Asia/Shanghai}
+      RUST_LOG: ${RUST_LOG:-info}
+    restart: unless-stopped
+    extra_hosts:
+      - "miloco:${MILOCO_HOST_IP:-host-gateway}"
+
+  miot-oauth:
+    container_name: miot-oauth
+    image: ghcr.nju.edu.cn/fantasy194/micam-rs:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: miloco_oauth_redirect
+    network_mode: host
+    volumes:
+      - ./config:/config
+    environment:
+      MIOT_TOKEN_FILE: ${MIOT_TOKEN_FILE:-/config/miot_token.json}
+      MIOT_OAUTH_REDIRECT_URI: ${MIOT_OAUTH_REDIRECT_URI:-https://mico.api.mijia.tech/login_redirect}
+      MIOT_OAUTH_BIND: ${MIOT_OAUTH_BIND:-0.0.0.0:18080}
+      MIOT_OAUTH_PUBLIC_BASE_URL: ${MIOT_OAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:18080}
+      MIOT_OAUTH_CALLBACK_PATH: ${MIOT_OAUTH_CALLBACK_PATH:-/api/miot/xiaomi_home_callback}
+      MIOT_OAUTH_UUID: ${MIOT_OAUTH_UUID:-micam-rs}
+      MIOT_OAUTH_SKIP_CONFIRM: ${MIOT_OAUTH_SKIP_CONFIRM:-false}
+      MIOT_CLOUD_SERVER: ${MIOT_CLOUD_SERVER:-cn}
+      TZ: ${TZ:-Asia/Shanghai}
+      RUST_LOG: ${RUST_LOG:-info}
+    profiles: ["oauth"]
+    restart: "no"

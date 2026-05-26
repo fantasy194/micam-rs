@@ -8,5 +8,23 @@ services:
       - path: .env
         required: false
     network_mode: host
-    gpus: all
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./config:/config
     restart: always
+
+  miot-oauth:
+    image: micam-rs:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: miloco_oauth_redirect
+    env_file:
+      - path: .env
+        required: false
+    network_mode: host
+    volumes:
+      - ./config:/config
+    profiles: ["oauth"]
+    restart: "no"
