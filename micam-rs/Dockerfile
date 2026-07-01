@@ -18,12 +18,22 @@ FROM debian:bookworm-slim
 
 ENV RUST_LOG=info
 
+ARG TARGETARCH
+ARG XIAOMI_MILOCO_VERSION=v0.1.2
+
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates ffmpeg libgcc-s1 libssl3 libstdc++6 && \
+    apt-get install -y --no-install-recommends ca-certificates ffmpeg libgcc-s1 libssl3 libstdc++6 wget && \
     rm -rf /var/lib/apt/lists/*
 
-ADD https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/main/miot_kit/miot/libs/linux/x86_64/libmiot_camera_lite.so /usr/local/lib/libmiot_camera_lite.so
-RUN chmod 0644 /usr/local/lib/libmiot_camera_lite.so
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) miot_arch="x86_64" ;; \
+        arm64) miot_arch="arm64" ;; \
+        *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    wget -q -O /usr/local/lib/libmiot_camera_lite.so \
+        "https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/${XIAOMI_MILOCO_VERSION}/miot_kit/miot/libs/linux/${miot_arch}/libmiot_camera_lite.so"; \
+    chmod 0644 /usr/local/lib/libmiot_camera_lite.so
 
 COPY --from=builder /usr/local/bin/micam-rs /usr/local/bin/micam-rs
 COPY --from=builder /usr/local/bin/miloco_probe /usr/local/bin/miloco_probe
