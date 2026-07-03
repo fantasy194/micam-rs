@@ -369,9 +369,9 @@ fn miot_host(cloud_server: &str) -> Result<CString> {
 fn miot_host_string(cloud_server: &str) -> String {
     let server = cloud_server.trim();
     if server.is_empty() || server == "cn" {
-        "oauth.api.io.mi.com".to_string()
+        "mico.api.mijia.tech".to_string()
     } else {
-        format!("{server}.oauth.api.io.mi.com")
+        format!("{server}.mico.api.mijia.tech")
     }
 }
 
@@ -462,11 +462,11 @@ mod tests {
     fn builds_miot_host_for_cn_and_global_regions() {
         assert_eq!(
             miot_host("cn").unwrap().to_str().unwrap(),
-            "oauth.api.io.mi.com"
+            "mico.api.mijia.tech"
         );
         assert_eq!(
             miot_host("de").unwrap().to_str().unwrap(),
-            "de.oauth.api.io.mi.com"
+            "de.mico.api.mijia.tech"
         );
     }
 
