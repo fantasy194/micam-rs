@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
-use anyhow::{anyhow, Context, Result};
 use crate::oauth::OAUTH2_CLIENT_ID;
+use anyhow::{anyhow, Context, Result};
 use libloading::Library;
 use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 
 const VIDEO_H264: u32 = 4;
 const VIDEO_H265: u32 = 5;
@@ -43,6 +44,7 @@ struct NativeCameraConfig {
 }
 
 type CameraHandle = *mut c_void;
+type LogCallback = extern "C" fn(c_int, *const c_char);
 type StatusCallback = extern "C" fn(c_int);
 type RawDataCallback = extern "C" fn(*const NativeFrameHeader, *const c_uchar);
 
@@ -74,6 +76,30 @@ pub struct NativeMiotConfig {
 impl NativeMiotConfig {
     pub fn queue_capacity(&self) -> usize {
         self.queue_capacity.max(1)
+    }
+
+    fn diagnostic_summary(&self) -> String {
+        format!(
+            "cloud_server={}, host={}, did={}, model={}, channel={}/{}, video_quality={}, audio={}, pin_code={}, token={}",
+            self.cloud_server.trim(),
+            miot_host_string(&self.cloud_server),
+            self.camera_id.trim(),
+            self.camera_model.trim(),
+            self.channel,
+            self.channel_count.max(1),
+            self.video_quality,
+            self.enable_audio,
+            if self.pin_code.as_deref().unwrap_or("").trim().is_empty() {
+                "absent"
+            } else {
+                "present"
+            },
+            if self.access_token.trim().is_empty() {
+                "absent"
+            } else {
+                "present"
+            }
+        )
     }
 }
 
@@ -109,6 +135,13 @@ impl NativeMiotSource {
         }
 
         let lib = NativeMiotLibrary::load(&config.lib_path)?;
+        unsafe {
+            (lib.miot_camera_set_log_handler)(Some(log_callback));
+        }
+        if let Ok(version) = Self::version_from_loaded_library(&lib) {
+            info!("MIoT native library version: {version}");
+        }
+
         let host = miot_host(&config.cloud_server)?;
         let client_id = CString::new(MIOT_CAMERA_CLIENT_ID)?;
         let access_token = CString::new(config.access_token.as_str())?;
@@ -122,6 +155,10 @@ impl NativeMiotSource {
         unsafe {
             (lib.miot_camera_init)(host.as_ptr(), client_id.as_ptr(), access_token.as_ptr());
         }
+        info!(
+            "Starting native MIoT source: {}",
+            config.diagnostic_summary()
+        );
 
         let info = NativeCameraInfo {
             did: did.as_ptr(),
@@ -131,9 +168,13 @@ impl NativeMiotSource {
         let handle = unsafe { (lib.miot_camera_new)(&info) };
         if handle.is_null() {
             unsafe {
+                let _ = (lib.miot_camera_set_log_handler)(None);
                 (lib.miot_camera_deinit)();
             }
-            return Err(anyhow!("miot_camera_new returned null"));
+            return Err(anyhow!(
+                "miot_camera_new returned null. config: {}",
+                config.diagnostic_summary()
+            ));
         }
 
         let (frame_tx, frame_rx) = mpsc::channel(config.queue_capacity());
@@ -153,6 +194,7 @@ impl NativeMiotSource {
         if status_result != 0 {
             cleanup_sender_slots();
             unsafe {
+                let _ = (lib.miot_camera_set_log_handler)(None);
                 (lib.miot_camera_free)(handle);
                 (lib.miot_camera_deinit)();
             }
@@ -161,16 +203,20 @@ impl NativeMiotSource {
             ));
         }
 
-        let raw_result =
-            unsafe { (lib.miot_camera_register_raw_data)(handle, raw_data_callback, config.channel) };
+        let raw_result = unsafe {
+            (lib.miot_camera_register_raw_data)(handle, raw_data_callback, config.channel)
+        };
         if raw_result != 0 {
             cleanup_sender_slots();
             unsafe {
                 (lib.miot_camera_unregister_status_changed)(handle);
+                let _ = (lib.miot_camera_set_log_handler)(None);
                 (lib.miot_camera_free)(handle);
                 (lib.miot_camera_deinit)();
             }
-            return Err(anyhow!("miot_camera_register_raw_data failed: {raw_result}"));
+            return Err(anyhow!(
+                "miot_camera_register_raw_data failed: {raw_result}"
+            ));
         }
 
         let mut qualities = vec![config.video_quality; config.channel_count.max(1) as usize];
@@ -182,14 +228,19 @@ impl NativeMiotSource {
         };
         let start_result = unsafe { (lib.miot_camera_start)(handle, &native_config) };
         if start_result != 0 {
+            let camera_status = unsafe { (lib.miot_camera_status)(handle) };
             cleanup_sender_slots();
             unsafe {
                 (lib.miot_camera_unregister_raw_data)(handle, config.channel);
                 (lib.miot_camera_unregister_status_changed)(handle);
+                let _ = (lib.miot_camera_set_log_handler)(None);
                 (lib.miot_camera_free)(handle);
                 (lib.miot_camera_deinit)();
             }
-            return Err(anyhow!("miot_camera_start failed: {start_result}"));
+            return Err(anyhow!(
+                "{}",
+                start_error_message(start_result, camera_status, config)
+            ));
         }
 
         Ok((
@@ -208,6 +259,10 @@ impl NativeMiotSource {
 
     pub fn version<P: AsRef<Path>>(lib_path: P) -> Result<String> {
         let lib = NativeMiotLibrary::load(lib_path.as_ref())?;
+        Self::version_from_loaded_library(&lib)
+    }
+
+    fn version_from_loaded_library(lib: &NativeMiotLibrary) -> Result<String> {
         let version = unsafe { (lib.miot_camera_version)() };
         if version.is_null() {
             return Err(anyhow!("miot_camera_version returned null"));
@@ -222,6 +277,7 @@ impl Drop for NativeMiotSource {
     fn drop(&mut self) {
         cleanup_sender_slots();
         unsafe {
+            let _ = (self.lib.miot_camera_set_log_handler)(None);
             let _ = (self.lib.miot_camera_stop)(self.handle);
             let _ = (self.lib.miot_camera_unregister_raw_data)(self.handle, self.channel);
             let _ = (self.lib.miot_camera_unregister_status_changed)(self.handle);
@@ -235,12 +291,14 @@ impl Drop for NativeMiotSource {
 
 struct NativeMiotLibrary {
     _library: Library,
+    miot_camera_set_log_handler: unsafe extern "C" fn(Option<LogCallback>),
     miot_camera_init: unsafe extern "C" fn(*const c_char, *const c_char, *const c_char) -> c_int,
     miot_camera_deinit: unsafe extern "C" fn(),
     miot_camera_new: unsafe extern "C" fn(*const NativeCameraInfo) -> CameraHandle,
     miot_camera_free: unsafe extern "C" fn(CameraHandle),
     miot_camera_start: unsafe extern "C" fn(CameraHandle, *const NativeCameraConfig) -> c_int,
     miot_camera_stop: unsafe extern "C" fn(CameraHandle) -> c_int,
+    miot_camera_status: unsafe extern "C" fn(CameraHandle) -> c_int,
     miot_camera_version: unsafe extern "C" fn() -> *const c_char,
     miot_camera_register_status_changed:
         unsafe extern "C" fn(CameraHandle, StatusCallback) -> c_int,
@@ -255,12 +313,14 @@ impl NativeMiotLibrary {
         let library = unsafe { Library::new(path) }
             .with_context(|| format!("failed to load MIoT camera library: {}", path.display()))?;
         unsafe {
+            let miot_camera_set_log_handler = *library.get(b"miot_camera_set_log_handler")?;
             let miot_camera_init = *library.get(b"miot_camera_init")?;
             let miot_camera_deinit = *library.get(b"miot_camera_deinit")?;
             let miot_camera_new = *library.get(b"miot_camera_new")?;
             let miot_camera_free = *library.get(b"miot_camera_free")?;
             let miot_camera_start = *library.get(b"miot_camera_start")?;
             let miot_camera_stop = *library.get(b"miot_camera_stop")?;
+            let miot_camera_status = *library.get(b"miot_camera_status")?;
             let miot_camera_version = *library.get(b"miot_camera_version")?;
             let miot_camera_register_status_changed =
                 *library.get(b"miot_camera_register_status_changed")?;
@@ -272,12 +332,14 @@ impl NativeMiotLibrary {
 
             Ok(Self {
                 _library: library,
+                miot_camera_set_log_handler,
                 miot_camera_init,
                 miot_camera_deinit,
                 miot_camera_new,
                 miot_camera_free,
                 miot_camera_start,
                 miot_camera_stop,
+                miot_camera_status,
                 miot_camera_version,
                 miot_camera_register_status_changed,
                 miot_camera_unregister_status_changed,
@@ -301,16 +363,47 @@ pub fn default_lib_path() -> PathBuf {
 }
 
 fn miot_host(cloud_server: &str) -> Result<CString> {
+    Ok(CString::new(miot_host_string(cloud_server))?)
+}
+
+fn miot_host_string(cloud_server: &str) -> String {
     let server = cloud_server.trim();
-    let host = if server.is_empty() || server == "cn" {
+    if server.is_empty() || server == "cn" {
         "oauth.api.io.mi.com".to_string()
     } else {
         format!("{server}.oauth.api.io.mi.com")
+    }
+}
+
+fn start_error_message(result: c_int, camera_status: c_int, config: &NativeMiotConfig) -> String {
+    let hint = match result {
+        -2 => "probable device-info or camera connection setup failure; check CAMERA_ID, MIOT_CAMERA_MODEL, MIOT_CLOUD_SERVER/account region, camera online state, LAN/UDP reachability, and try MIOT_VIDEO_QUALITY=0 or 1",
+        -1 => "native library rejected the start request; check token, camera id/model, and camera state",
+        _ => "native library returned a non-zero start code; inspect preceding MIoT native log lines for the lower-level cause",
     };
-    Ok(CString::new(host)?)
+
+    format!(
+        "miot_camera_start failed: {result}; camera_status={camera_status}; {hint}. config: {}",
+        config.diagnostic_summary()
+    )
+}
+
+extern "C" fn log_callback(level: c_int, msg: *const c_char) {
+    if msg.is_null() {
+        return;
+    }
+
+    let message = unsafe { CStr::from_ptr(msg) }.to_string_lossy();
+    match level {
+        0 | 1 => debug!("MIoT native: {message}"),
+        2 => info!("MIoT native: {message}"),
+        3 => warn!("MIoT native: {message}"),
+        _ => error!("MIoT native(level={level}): {message}"),
+    }
 }
 
 extern "C" fn status_callback(status: c_int) {
+    info!("MIoT native camera status changed: {status}");
     if let Some(slot) = STATUS_TX.get() {
         if let Some(tx) = slot.lock().expect("status sender mutex poisoned").as_ref() {
             let _ = tx.try_send(status);
@@ -337,7 +430,11 @@ extern "C" fn raw_data_callback(header: *const NativeFrameHeader, data: *const c
     };
 
     if let Some(slot) = RAW_FRAME_TX.get() {
-        if let Some(tx) = slot.lock().expect("raw frame sender mutex poisoned").as_ref() {
+        if let Some(tx) = slot
+            .lock()
+            .expect("raw frame sender mutex poisoned")
+            .as_ref()
+        {
             let _ = tx.try_send(frame);
         }
     }
