@@ -14,7 +14,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp /app/target/release/miloco_oauth_redirect /usr/local/bin/miloco_oauth_redirect && \
     cp /app/target/release/miot_native_probe /usr/local/bin/miot_native_probe
 
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 
 ENV RUST_LOG=info
 
@@ -22,7 +22,7 @@ ARG TARGETARCH
 ARG XIAOMI_MILOCO_VERSION=v0.1.2
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates ffmpeg libgcc-s1 libssl3 libstdc++6 wget && \
+    apt-get install -y --no-install-recommends ca-certificates ffmpeg libgcc-s1 libssl3t64 libstdc++6 wget && \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
